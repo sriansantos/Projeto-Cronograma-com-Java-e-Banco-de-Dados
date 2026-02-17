@@ -1,0 +1,326 @@
+package com.mycompany.aps;
+
+// Importações de pacotes necessários
+import java.awt.*;                    // Componentes gráficos (AWT)
+import java.awt.event.*;              // Eventos do AWT (botão, teclado etc.)
+import java.sql.*;                    // Conexão com banco de dados
+import java.time.*;                   // Controle de tempo (Instant, Duration)
+
+// Classe principal do programa
+public class CronometroVoltas {
+
+    // Declaração de variáveis para a interface gráfica e lógica do sistema
+    Frame frame;
+    Label tempoLabel;
+    Button iniciarPararBtn, registrarVoltaBtn, resetBtn;
+    TextField equipeField, corredorField;
+    TextArea areaVoltas;
+
+    // Armazena o instante de início da volta
+    Instant inicioVolta;
+    boolean cronometroRodando = false;
+    Thread cronometroThread; // Thread que atualiza o cronômetro
+
+    // Variáveis para conexão com banco de dados MySQL
+    Connection conexao;
+    String URL = "jdbc:mysql://127.0.0.1:3307/cronometro_voltas?useSSL=false&serverTimezone=UTC";
+    String USER = "root";
+    String PASS = "";
+
+    // Contador de voltas
+    int contadorVoltas = 0;
+
+    // Método main: ponto de entrada do programa
+    public static void main(String[] args) {
+        new CronometroVoltas().start();
+    }
+
+    // Método que inicializa toda a interface gráfica e as conexões
+    void start() {
+        frame = new Frame("Voltas");
+        frame.setSize(500, 500);
+        frame.setLayout(new BorderLayout());
+        frame.setBackground(new Color(255, 239, 188)); // cor de fundo
+
+        // Painel superior com os campos e botões
+        Panel topPanel = new Panel();
+        topPanel.setLayout(new GridLayout(4, 2, 5, 5)); // grade de 4 linhas, 2 colunas
+
+        // Campo "Equipe"
+        topPanel.add(new Label("Equipe:"));
+        equipeField = new TextField();
+        topPanel.add(equipeField);
+
+        // Campo "Corredor"
+        topPanel.add(new Label("Corredor:"));
+        corredorField = new TextField();
+        topPanel.add(corredorField);
+
+        // Botão Iniciar/Parar
+        iniciarPararBtn = new Button("Iniciar");
+        iniciarPararBtn.setBackground(new Color(40, 167, 69)); // verde
+        iniciarPararBtn.setForeground(Color.WHITE);
+        // LAMBDA: Listener para clique do botão iniciar/parar
+        iniciarPararBtn.addActionListener(e -> controlarCronometro());
+        topPanel.add(iniciarPararBtn);
+
+        // Botão Registrar Volta
+        registrarVoltaBtn = new Button("Marque a volta");
+        registrarVoltaBtn.setBackground(new Color(108, 117, 125)); // cinza
+        registrarVoltaBtn.setForeground(Color.WHITE);
+        registrarVoltaBtn.setEnabled(false); // inicialmente desativado
+        // LAMBDA: Listener para clique do botão registrar volta
+        registrarVoltaBtn.addActionListener(e -> registrarVolta());
+        topPanel.add(registrarVoltaBtn);
+
+        // LAMBDA: Listeners para ativar ou desativar o botão volta conforme os campos
+        equipeField.addTextListener(e -> validarCampos());
+        corredorField.addTextListener(e -> validarCampos());
+
+        // Painel do botão Reset
+        Panel resetPanel = new Panel(new BorderLayout());
+        resetBtn = new Button("Reset");
+        resetBtn.setFont(new Font("Arial", Font.BOLD, 16));
+        resetBtn.setBackground(new Color(220, 53, 69)); // vermelho
+        resetBtn.setForeground(Color.WHITE);
+        // LAMBDA: Listener para clique do botão reset
+        resetBtn.addActionListener(e -> resetarBanco());
+        resetPanel.add(resetBtn, BorderLayout.CENTER);
+
+        // Monta o painel geral superior (campos + reset)
+        Panel painelGeral = new Panel();
+        painelGeral.setLayout(new BorderLayout());
+        painelGeral.add(topPanel, BorderLayout.NORTH);
+        painelGeral.add(resetPanel, BorderLayout.SOUTH);
+
+        frame.add(painelGeral, BorderLayout.NORTH);
+
+        // Label do cronômetro
+        tempoLabel = new Label("00:00:00.000", Label.CENTER);
+        tempoLabel.setFont(new Font("Arial", Font.BOLD, 24));
+        frame.add(tempoLabel, BorderLayout.CENTER);
+
+        // Área de texto que mostra as voltas registradas
+        areaVoltas = new TextArea("", 5, 40, TextArea.SCROLLBARS_VERTICAL_ONLY);
+        areaVoltas.setEditable(false);
+        areaVoltas.setBackground(new Color(255, 239, 188));
+        frame.add(areaVoltas, BorderLayout.SOUTH);
+
+        // Listener para fechar a aplicação corretamente
+        frame.addWindowListener(new WindowAdapter() {
+            public void windowClosing(WindowEvent e) {
+                try {
+                    if (conexao != null) conexao.close();
+                } catch (Exception ex) {}
+                System.exit(0);
+            }
+        });
+
+        // Conectar ao banco e carregar as voltas existentes
+        conectarBanco();
+        carregarVoltas();
+        configurarBloqueioPrintScreen(); // recurso divertido para bloquear printscreen
+
+        // Exibir a janela
+        frame.setVisible(true);
+    }
+
+    // Valida se os campos "Equipe" e "Corredor" estão preenchidos
+    void validarCampos() {
+        String equipe = equipeField.getText().trim();
+        String corredor = corredorField.getText().trim();
+        boolean camposPreenchidos = !equipe.isEmpty() && !corredor.isEmpty();
+        registrarVoltaBtn.setEnabled(camposPreenchidos && cronometroRodando);
+    }
+
+    // Conecta ao banco de dados MySQL
+    void conectarBanco() {
+        try {
+            conexao = DriverManager.getConnection(URL, USER, PASS);
+            System.out.println("Conectado ao banco.");
+        } catch (Exception e) {
+            System.out.println("Erro banco: " + e.getMessage());
+            System.exit(1);
+        }
+    }
+
+    // Controla o botão Iniciar/Parar
+    void controlarCronometro() {
+        String equipe = equipeField.getText().trim();
+        String corredor = corredorField.getText().trim();
+
+        // Se for iniciar e os campos estão vazios → exibe aviso e não inicia
+        if (!cronometroRodando && (equipe.isEmpty() || corredor.isEmpty())) {
+            Dialog aviso = new Dialog(frame, "Aviso", true);
+            aviso.setLayout(new BorderLayout());
+            Label msg = new Label("Preencha a equipe e o corredor para comerçarmos!", Label.CENTER);
+            msg.setFont(new Font("Arial", Font.BOLD, 14));
+            aviso.add(msg, BorderLayout.CENTER);
+
+            Button okBtn = new Button("OK");
+            // LAMBDA: Fechar aviso
+            okBtn.addActionListener(ev -> aviso.dispose());
+            aviso.add(okBtn, BorderLayout.SOUTH);
+
+            aviso.setSize(400, 150);
+            aviso.setLocationRelativeTo(frame);
+            aviso.setVisible(true);
+            return;
+        }
+
+        // Alterna o estado do cronômetro
+        if (cronometroRodando) {
+            cronometroRodando = false;
+            iniciarPararBtn.setLabel("Iniciar");
+        } else {
+            inicioVolta = Instant.now();
+            cronometroRodando = true;
+            iniciarPararBtn.setLabel("Parar");
+            iniciarThreadCronometro();
+        }
+        validarCampos();
+    }
+
+    // Inicia uma thread para atualizar o cronômetro na interface
+    void iniciarThreadCronometro() {
+        cronometroThread = new Thread(() -> {
+            while (cronometroRodando) {
+                Duration duracao = Duration.between(inicioVolta, Instant.now());
+                long h = duracao.toHours();
+                long m = duracao.toMinutes() % 60;
+                long s = duracao.getSeconds() % 60;
+                long ms = duracao.toMillis() % 1000;
+                String tempo = String.format("%02d:%02d:%02d.%03d", h, m, s, ms);
+
+                // Atualiza o label na interface
+                EventQueue.invokeLater(() -> tempoLabel.setText(tempo));
+
+                try {
+                    Thread.sleep(10); // Atualiza a cada 10ms
+                } catch (InterruptedException ignored) {}
+            }
+        });
+        cronometroThread.start();
+    }
+
+    // Registra uma volta no banco de dados
+    void registrarVolta() {
+        if (!cronometroRodando) return;
+        String equipe = equipeField.getText().trim();
+        String corredor = corredorField.getText().trim();
+        String tempo = tempoLabel.getText();
+
+        contadorVoltas++;
+        long tempoMillis = converterTempoParaMillis(tempo);
+
+        try {
+            String sql = "INSERT INTO volta (numero_volta, tempo, tempo_millis, equipe, corredor) VALUES (?, ?, ?, ?, ?)";
+            PreparedStatement pstmt = conexao.prepareStatement(sql);
+            pstmt.setInt(1, contadorVoltas);
+            pstmt.setString(2, tempo);
+            pstmt.setLong(3, tempoMillis);
+            pstmt.setString(4, equipe);
+            pstmt.setString(5, corredor);
+            pstmt.executeUpdate();
+            pstmt.close();
+
+            carregarVoltas();
+
+            // Após 2 voltas → reinicia tudo para nova equipe
+            if (contadorVoltas >= 2) {
+                cronometroRodando = false;
+                tempoLabel.setText("00:00:00.000");
+                iniciarPararBtn.setLabel("Iniciar");
+                equipeField.setText("");
+                corredorField.setText("");
+                contadorVoltas = 0;
+            } else {
+                tempoLabel.setText("00:00:00.000");
+            }
+
+        } catch (Exception e) {
+            System.out.println("Erro: " + e.getMessage());
+        }
+
+        validarCampos();
+    }
+
+    // Carrega as voltas salvas no banco e mostra na área de texto
+    void carregarVoltas() {
+        StringBuilder b = new StringBuilder();
+        b.append(String.format("%-12s %-10s %-15s %-15s\n", "Volta", "Tempo", "Equipe", "Corredor"));
+        try {
+            Statement stmt = conexao.createStatement();
+            String sql = "SELECT numero_volta, tempo, equipe, corredor FROM volta ORDER BY tempo_millis ASC";
+            ResultSet rs = stmt.executeQuery(sql);
+            while (rs.next()) {
+                b.append(String.format("%-12d %-10s %-15s %-15s\n",
+                        rs.getInt("numero_volta"), rs.getString("tempo"),
+                        rs.getString("equipe"), rs.getString("corredor")));
+            }
+            rs.close();
+            stmt.close();
+        } catch (Exception e) {
+            System.out.println("Erro carregar: " + e.getMessage());
+        }
+        areaVoltas.setText(b.toString());
+    }
+
+    // Converte o tempo (hh:mm:ss.ms) em milissegundos para ordenação no banco
+    long converterTempoParaMillis(String tempo) {
+        try {
+            String[] partes = tempo.split("[:\\.]");
+            long horas = Long.parseLong(partes[0]);
+            long minutos = Long.parseLong(partes[1]);
+            long segundos = Long.parseLong(partes[2]);
+            long milissegundos = Long.parseLong(partes[3]);
+
+            return (horas * 3600000) + (minutos * 60000) + (segundos * 1000) + milissegundos;
+        } catch (Exception e) {
+            System.out.println("Erro ao converter tempo: " + tempo);
+            return Long.MAX_VALUE;
+        }
+    }
+
+    // Limpa todas as voltas no banco
+    void resetarBanco() {
+        try {
+            Statement stmt = conexao.createStatement();
+            stmt.executeUpdate("TRUNCATE TABLE volta");
+            stmt.close();
+            areaVoltas.setText("");
+        } catch (Exception e) {
+            System.out.println("Erro ao resetar banco: " + e.getMessage());
+        }
+    }
+
+    // Função divertida: bloqueia PrintScreen mostrando uma mensagem
+    void configurarBloqueioPrintScreen() {
+        KeyboardFocusManager manager = KeyboardFocusManager.getCurrentKeyboardFocusManager();
+        manager.addKeyEventDispatcher(new KeyEventDispatcher() {
+            @Override
+            public boolean dispatchKeyEvent(KeyEvent e) {
+                if (e.getID() == KeyEvent.KEY_RELEASED && e.getKeyCode() == KeyEvent.VK_PRINTSCREEN) {
+                    EventQueue.invokeLater(() -> {
+                        Dialog aviso = new Dialog(frame, "Aviso", true);
+                        aviso.setLayout(new BorderLayout());
+                        Label msg = new Label("Você não pode fazer isso. Absolute cinema.", Label.CENTER);
+                        msg.setFont(new Font("Arial", Font.BOLD, 45));
+                        aviso.add(msg, BorderLayout.CENTER);
+
+                        Button okBtn = new Button("OK");
+                        okBtn.addActionListener(ev -> aviso.dispose());
+                        aviso.add(okBtn, BorderLayout.SOUTH);
+
+                        aviso.setBounds(frame.getBounds());
+                        aviso.setVisible(true);
+                    });
+                }
+                return false;
+            }
+        });
+    }
+}
+
+
+
